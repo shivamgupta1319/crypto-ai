@@ -9,11 +9,18 @@ function regimeTone(r: string): 'pos' | 'neg' | 'warn' | 'neutral' {
   return 'neutral'
 }
 
+function Spinner() {
+  return (
+    <span className="inline-block w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin align-[-2px]" />
+  )
+}
+
 export default function Agent() {
   const [ov, setOv] = useState<AgentOverview | null>(null)
   const [regime, setRegime] = useState<RegimeView | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [reviewMsg, setReviewMsg] = useState<string | null>(null)
 
   const refresh = useCallback(() => {
     api.getAgentOverview().then(setOv).catch((e) => setError(String(e.message)))
@@ -34,6 +41,27 @@ export default function Agent() {
     }
   }
 
+  async function runReview() {
+    setBusy('review')
+    setError(null)
+    setReviewMsg(null)
+    try {
+      const r = await api.agentReview()
+      const bits = [`${r.created} new proposal${r.created === 1 ? '' : 's'}`, `${r.pending} pending`]
+      let msg = `Review complete — ${bits.join(', ')}.`
+      if (r.created === 0 && r.pending === 0) {
+        msg += ' Nothing to propose yet — the agent needs closed paper trades (≥10 per strategy) to judge performance.'
+      }
+      if (!r.narrative) msg += ' (Add a Gemini/OpenRouter key in .env for a written assessment.)'
+      setReviewMsg(msg)
+      refresh()
+    } catch (e) {
+      setError(String((e as Error).message))
+    } finally {
+      setBusy(null)
+    }
+  }
+
   if (!ov) return <p className="text-slate-400">Loading agent…</p>
 
   return (
@@ -44,15 +72,21 @@ export default function Agent() {
           subtitle="Learns from results & market regime to propose improvements — paper-only, you approve every change"
         />
         <button
-          onClick={() => act('review', api.agentReview)}
+          onClick={runReview}
           disabled={busy === 'review'}
-          className="px-4 py-1.5 rounded-md text-sm bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 font-medium"
+          className="px-4 py-1.5 rounded-md text-sm bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 font-medium inline-flex items-center gap-2"
         >
+          {busy === 'review' && <Spinner />}
           {busy === 'review' ? 'Reviewing…' : 'Run review cycle'}
         </button>
       </div>
 
       {error && <p className="text-rose-400 text-sm mb-4">{error}</p>}
+      {reviewMsg && (
+        <div className="mb-4 rounded-md border border-indigo-500/30 bg-indigo-500/10 px-3 py-2 text-sm text-indigo-200">
+          {reviewMsg}
+        </div>
+      )}
 
       {/* Regime + status strip */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
@@ -79,8 +113,9 @@ export default function Agent() {
           <button
             onClick={() => act('train', () => api.agentTrain(null))}
             disabled={busy === 'train' || ov.dataset.total < (ov.model.min_samples ?? 100)}
-            className="mt-2 px-3 py-1 rounded text-xs bg-slate-700 hover:bg-slate-600 disabled:opacity-40"
+            className="mt-2 px-3 py-1 rounded text-xs bg-slate-700 hover:bg-slate-600 disabled:opacity-40 inline-flex items-center gap-2"
           >
+            {busy === 'train' && <Spinner />}
             {busy === 'train' ? 'Training…' : 'Train global model'}
           </button>
           <div className="text-xs text-slate-500 mt-1">Build samples from a backtest first (≥ {ov.model.min_samples ?? 100}).</div>
