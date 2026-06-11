@@ -247,6 +247,49 @@ export interface NewsItem {
   sentiment: 'positive' | 'negative' | 'neutral'
 }
 
+export interface AutoSelectCandidate {
+  symbol: string
+  timeframe: string
+  strategy: string
+  score: number | null
+  metric: string
+  return_pct: number
+  buy_hold_return_pct: number | null
+  sharpe: number
+  total_trades: number
+  win_rate: number
+  max_drawdown_pct: number
+  profit_factor: number | null
+  oos_held_up: boolean | null
+  flags: string[]
+  recommended: boolean
+  excluded_reasons: string[]
+}
+
+export interface AutoSelectResult {
+  metric: string
+  combos_tested: number
+  candidates: AutoSelectCandidate[]
+  recommended_count: number
+  promoted: Array<{ symbol: string; timeframe: string; strategy: string }>
+  top_n: number
+}
+
+export interface AutoSelectRequest {
+  start: string
+  end: string
+  symbols?: string[]
+  timeframes?: string[]
+  strategies?: string[]
+  metric?: string
+  min_trades?: number
+  require_beat_buyhold?: boolean
+  oos_check?: boolean
+  top_n?: number
+  promote?: boolean
+  leverage?: number
+}
+
 export interface AgentProposal {
   id: number
   created_at: string | null
@@ -382,6 +425,8 @@ export const api = {
       `/api/signals/current?scope=${scope}`,
     ),
   getScanStatus: () => http<ScanStatus>('/api/signals/status'),
+  autoSelect: (body: AutoSelectRequest) =>
+    http<AutoSelectResult>('/api/backtest/autoselect', { method: 'POST', body: JSON.stringify(body) }),
   getBacktestRuns: (limit = 50) => http<BacktestRunSummary[]>(`/api/backtest/runs?limit=${limit}`),
   getBacktestRun: (id: number) => http<BacktestResponse>(`/api/backtest/runs/${id}`),
   getSignals: (limit = 50) => http<LiveSignal[]>(`/api/signals?limit=${limit}`),

@@ -5,10 +5,11 @@ import json
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.backtest import robustness
+from app.backtest import autoselect, robustness
 from app.backtest.engine import BacktestConfig, run_backtest
 from app.config import settings
 from app.data.binance import load_candles
@@ -170,6 +171,58 @@ def montecarlo(req: RobustnessRequest) -> dict:
     if mc is None:
         raise HTTPException(422, "Not enough trades (need >= 5) for Monte Carlo.")
     return {"trades": len(res.trades), **mc}
+
+
+class AutoSelectRequest(BaseModel):
+    start: str
+    end: str
+    symbols: list[str] | None = None
+    timeframes: list[str] | None = None
+    strategies: list[str] | None = None
+    metric: str = "sharpe"
+    min_trades: int = 15
+    require_beat_buyhold: bool = False
+    oos_check: bool = True
+    top_n: int = 5
+    promote: bool = False
+    leverage: float | None = None
+    risk_per_trade_pct: float | None = None
+
+
+@router.post("/autoselect")
+def autoselect_endpoint(req: AutoSelectRequest, db: Session = Depends(get_db)) -> dict:
+    """Screen every coin × strategy × timeframe over a window, rank by performance
+    with anti-overfit gates, and optionally auto-promote the recommended top N."""
+    symbols = req.symbols or settings.symbols
+    timeframes = req.timeframes or ["1h"]
+    strategies = req.strategies or autoselect.all_strategy_names()
+
+    bad_sym = [s for s in symbols if s not in settings.symbols]
+    if bad_sym:
+        raise HTTPException(422, f"Unknown symbols {bad_sym}. Allowed: {settings.symbols}")
+    bad_tf = [t for t in timeframes if t not in settings.timeframes]
+    if bad_tf:
+        raise HTTPException(422, f"Unknown timeframes {bad_tf}. Allowed: {settings.timeframes}")
+    for name in strategies:
+        try:
+            get_strategy(name)
+        except KeyError as exc:
+            raise HTTPException(422, str(exc)) from exc
+    if _iso_to_ms(req.end) <= _iso_to_ms(req.start):
+        raise HTTPException(422, "end must be after start")
+
+    cfg = BacktestConfig()
+    if req.leverage is not None:
+        cfg.leverage = min(req.leverage, settings.max_leverage)
+    if req.risk_per_trade_pct is not None:
+        cfg.risk_per_trade_pct = req.risk_per_trade_pct
+
+    return autoselect.auto_select(
+        db, symbols, timeframes, strategies, req.start, req.end,
+        metric=req.metric, min_trades=req.min_trades,
+        require_beat_buyhold=req.require_beat_buyhold, oos_check=req.oos_check,
+        cfg=cfg, top_n=req.top_n, promote=req.promote,
+    )
 
 
 @router.get("/runs", response_model=list[BacktestRunSummary])

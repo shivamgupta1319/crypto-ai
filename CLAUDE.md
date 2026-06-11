@@ -20,6 +20,9 @@ All data sources must stay **free, no API key requiring a card**.
     annualized Sharpe/Sortino/Calmar/CAGR/expectancy/exposure metrics, and a buy-&-hold benchmark.
   - `app/backtest/robustness.py` — parameter sweep (+heatmap, ±10% perturbation), out-of-sample
     split, walk-forward, Monte Carlo. Exposed at `/api/backtest/{sweep,oos,walkforward,montecarlo}`.
+  - `app/backtest/autoselect.py` — screens every coin × strategy × timeframe over a window, ranks
+    by a metric with anti-overfit gates (min trades, profitable, OOS-holds-up, no red flags), and can
+    auto-promote the recommended top N. Exposed at `/api/backtest/autoselect` (Backtesting → Auto-Select).
   - `app/live/` — `scanner.py` (entry-event detection, reuses strategies), `manager.py`
     (WebSocket broadcast), `scheduler.py` (AsyncIOScheduler, scans every 60s),
     `cycle.py` (shared scan+paper-trade orchestrator used by scheduler + manual scan).

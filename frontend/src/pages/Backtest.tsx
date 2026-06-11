@@ -10,6 +10,7 @@ import {
 import { Badge, Card, PageTitle, Stat } from '../components/ui'
 import EquityChart from '../components/EquityChart'
 import RobustnessPanel from '../components/RobustnessPanel'
+import AutoSelectPanel from '../components/AutoSelectPanel'
 import type { AiResponse } from '../api/client'
 
 const COLORS = ['#34d399', '#60a5fa', '#f472b6', '#fbbf24', '#a78bfa', '#22d3ee']
@@ -35,6 +36,7 @@ export default function Backtest() {
   const [showHistory, setShowHistory] = useState(false)
   const [runs, setRuns] = useState<BacktestRunSummary[]>([])
   const [showRobustness, setShowRobustness] = useState(false)
+  const [showAutoSelect, setShowAutoSelect] = useState(false)
   const [explain, setExplain] = useState<AiResponse | null>(null)
   const [explaining, setExplaining] = useState(false)
 
@@ -138,6 +140,12 @@ export default function Backtest() {
         />
         <div className="flex gap-2">
           <button
+            onClick={() => setShowAutoSelect((v) => !v)}
+            className="px-3 py-1.5 rounded-md text-sm border border-slate-700 text-slate-300 hover:border-slate-500"
+          >
+            {showAutoSelect ? 'Hide auto-select' : 'Auto-Select'}
+          </button>
+          <button
             onClick={() => setShowRobustness((v) => !v)}
             className="px-3 py-1.5 rounded-md text-sm border border-slate-700 text-slate-300 hover:border-slate-500"
           >
@@ -151,6 +159,10 @@ export default function Backtest() {
           </button>
         </div>
       </div>
+
+      {showAutoSelect && config && (
+        <AutoSelectPanel config={config} start={start} end={end} leverage={leverage} />
+      )}
 
       {showRobustness && config && strategies.length > 0 && (
         <RobustnessPanel
