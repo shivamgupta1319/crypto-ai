@@ -46,3 +46,17 @@ def run_migrations() -> None:
         command.upgrade(cfg, "head")
     else:
         command.upgrade(cfg, "head")
+
+    # Safety net: reconcile any model tables that are physically missing despite
+    # the recorded revision. This rescues DBs stamped to head by an earlier build
+    # *before* a table's migration existed (create_all only creates missing tables,
+    # never altering or dropping existing ones).
+    import app.models  # noqa: F401  (register all tables on Base.metadata)
+    from app.db.session import Base
+
+    expected = set(Base.metadata.tables)
+    present = set(inspect(engine).get_table_names())
+    missing = expected - present
+    if missing:
+        logger.warning("reconciling missing tables not created by migrations: %s", sorted(missing))
+        Base.metadata.create_all(bind=engine)
