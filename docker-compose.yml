@@ -1,0 +1,24 @@
+# crypto-ai — one-command local stack (backend + frontend).
+# Host ports are configurable and default to non-clashing values (8090 / 5190)
+# to avoid common 8000/5173 conflicts. Use scripts/start.sh to auto-pick free ports.
+services:
+  backend:
+    build: ./backend
+    environment:
+      - CRYPTOAI_DB_PATH=/data/cryptoai.db
+    volumes:
+      - cryptoai-data:/data
+    ports:
+      - "${BACKEND_PORT:-8090}:8000"
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      - backend
+    ports:
+      - "${FRONTEND_PORT:-5190}:80"
+    restart: unless-stopped
+
+volumes:
+  cryptoai-data:

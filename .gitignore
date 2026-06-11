@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Env / secrets
+.env
+.env.*
+*.key
+secrets/
+
+# Database / data artifacts
+*.db
+*.sqlite
+*.sqlite3
+backend/data_cache/
+
+# ML model artifacts (trained meta-label models)
+backend/models/
+*.joblib
+
+# Node / frontend
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# OS / editor
+.DS_Store
+*.log
+
+# Claude
+.claude/settings.local.json
