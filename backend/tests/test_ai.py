@@ -8,6 +8,13 @@ import app.ai as ai
 from app.ai import context as ctx
 
 
+@pytest.fixture(autouse=True)
+def _no_autodiscover(monkeypatch):
+    # Keep provider-chain tests offline + deterministic (no live model fetch).
+    monkeypatch.setattr(ai.settings, "openrouter_autodiscover", False)
+    ai._free_models_cache = None
+
+
 # --- provider selection / status ---------------------------------------------
 def test_disabled_when_no_keys(monkeypatch):
     monkeypatch.setattr(ai.settings, "ai_provider", "auto")
@@ -118,6 +125,63 @@ def test_complete_falls_back_to_openrouter_on_429(monkeypatch):
 
     monkeypatch.setattr(ai.httpx, "post", fake_post)
     assert ai.complete("q") == "fallback answer"
+
+
+def test_rolls_through_openrouter_models(monkeypatch):
+    # Gemini 429, first OpenRouter model 429, second OpenRouter model succeeds.
+    monkeypatch.setattr(ai.settings, "ai_provider", "auto")
+    monkeypatch.setattr(ai.settings, "gemini_api_key", "g")
+    monkeypatch.setattr(ai.settings, "openrouter_api_key", "o")
+    monkeypatch.setattr(ai.settings, "openrouter_model", "model-a:free")
+    monkeypatch.setattr(ai.settings, "openrouter_fallback_models", ["model-b:free"])
+
+    class _Req:
+        pass
+
+    class _Resp429:
+        status_code = 429
+
+    calls = []
+
+    def fake_post(url, **kwargs):
+        if "generativelanguage" in url:
+            raise ai.httpx.HTTPStatusError("429", request=_Req(), response=_Resp429())
+        model = kwargs["json"]["model"]
+        calls.append(model)
+        if model == "model-a:free":
+            raise ai.httpx.HTTPStatusError("429", request=_Req(), response=_Resp429())
+        return _Resp({"choices": [{"message": {"content": "from model-b"}}]})
+
+    monkeypatch.setattr(ai.httpx, "post", fake_post)
+    assert ai.complete("q") == "from model-b"
+    assert calls == ["model-a:free", "model-b:free"]  # tried in order
+
+
+def test_autodiscover_extends_chain(monkeypatch):
+    monkeypatch.setattr(ai.settings, "openrouter_autodiscover", True)
+    monkeypatch.setattr(ai.settings, "openrouter_model", "primary:free")
+    monkeypatch.setattr(ai.settings, "openrouter_fallback_models", [])
+    monkeypatch.setattr(ai.settings, "openrouter_max_models", 8)
+    ai._free_models_cache = None
+
+    class _R:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": [
+                {"id": "primary:free", "architecture": {"modality": "text->text"}},
+                {"id": "discovered-x:free", "architecture": {"modality": "text->text"}},
+                {"id": "nvidia/nemotron-3.5-content-safety:free", "architecture": {"modality": "text->text"}},
+                {"id": "paid/model", "architecture": {"modality": "text->text"}},
+            ]}
+
+    monkeypatch.setattr(ai.httpx, "get", lambda *a, **k: _R())
+    models = ai._openrouter_models()
+    assert "primary:free" in models and "discovered-x:free" in models  # discovered appended
+    assert "paid/model" not in models  # only :free
+    assert all("safety" not in m for m in models)  # safety models skipped
+    assert models[0] == "primary:free"  # primary stays first
 
 
 def test_all_providers_rate_limited_raises(monkeypatch):

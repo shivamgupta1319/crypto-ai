@@ -67,6 +67,20 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-2.0-flash"
     openrouter_api_key: str = ""
     openrouter_model: str = "meta-llama/llama-3.3-70b-instruct:free"
+    # Extra free OpenRouter models tried in order after openrouter_model — so a
+    # rate-limited/congested free model rolls over to the next one. Override via
+    # CRYPTOAI_OPENROUTER_FALLBACK_MODELS (JSON list) in .env if desired.
+    openrouter_fallback_models: list[str] = [
+        "openai/gpt-oss-120b:free",
+        "nvidia/nemotron-3-super-120b-a12b:free",
+        "qwen/qwen3-next-80b-a3b-instruct:free",
+        "google/gemma-4-31b-it:free",
+    ]
+    # Beyond the curated list above, also auto-discover currently-live free models
+    # from OpenRouter so the chain self-heals as model IDs change. Total attempts
+    # are capped so a fully rate-limited run doesn't stall.
+    openrouter_autodiscover: bool = True
+    openrouter_max_models: int = 8
     ai_request_timeout: float = 30.0
     ai_max_output_tokens: int = 700
 
