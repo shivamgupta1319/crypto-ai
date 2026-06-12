@@ -67,23 +67,39 @@ def test_min_trades_gate_excludes(db):
     assert any("trades" in r for r in c["excluded_reasons"])
 
 
-def test_promote_writes_active_rows(db):
+def test_promote_writes_active_rows_with_ids(db):
     out = autoselect.auto_select(
         db, ["BTCUSDT", "ETHUSDT"], ["1h"], ["macd_rsi", "supertrend"],
         "2024-01-01", "2024-03-01", min_trades=1, oos_check=False,
         cfg=BacktestConfig(), top_n=2, promote=True,
     )
     promoted = out["promoted"]
-    assert len(promoted) <= 2
     rows = db.query(ActiveStrategy).all()
     assert len(rows) == len(promoted)
     if promoted:
         assert all(r.enabled == 1 for r in rows)
+        # Each promoted pick carries its active_id + metrics for the UI / remove action.
+        for p in promoted:
+            assert "active_id" in p and "return_pct" in p and "max_drawdown_pct" in p
+            assert db.get(ActiveStrategy, p["active_id"]) is not None
 
 
-def test_invalid_metric_falls_back_to_sharpe(db):
+def test_best_per_coin_selection(db):
+    out = autoselect.auto_select(
+        db, ["BTCUSDT", "ETHUSDT"], ["1h"], ["macd_rsi", "supertrend", "ema_trend_adx"],
+        "2024-01-01", "2024-03-01", min_trades=1, oos_check=False,
+        metric="composite", cfg=BacktestConfig(), per_coin_top=1, promote=True,
+    )
+    # At most one pick per coin.
+    by_coin: dict[str, int] = {}
+    for p in out["selected"]:
+        by_coin[p["symbol"]] = by_coin.get(p["symbol"], 0) + 1
+    assert all(n <= 1 for n in by_coin.values())
+
+
+def test_invalid_metric_falls_back_to_composite(db):
     out = autoselect.auto_select(
         db, ["BTCUSDT"], ["1h"], ["macd_rsi"], "2024-01-01", "2024-03-01",
         metric="bogus", min_trades=1, cfg=BacktestConfig(),
     )
-    assert out["metric"] == "sharpe"
+    assert out["metric"] == "composite"

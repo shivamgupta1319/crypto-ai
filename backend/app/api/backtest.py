@@ -179,11 +179,12 @@ class AutoSelectRequest(BaseModel):
     symbols: list[str] | None = None
     timeframes: list[str] | None = None
     strategies: list[str] | None = None
-    metric: str = "sharpe"
+    metric: str = "composite"
     min_trades: int = 15
     require_beat_buyhold: bool = False
     oos_check: bool = True
     top_n: int = 5
+    per_coin_top: int | None = None
     promote: bool = False
     leverage: float | None = None
     risk_per_trade_pct: float | None = None
@@ -194,7 +195,7 @@ def autoselect_endpoint(req: AutoSelectRequest, db: Session = Depends(get_db)) -
     """Screen every coin × strategy × timeframe over a window, rank by performance
     with anti-overfit gates, and optionally auto-promote the recommended top N."""
     symbols = req.symbols or settings.symbols
-    timeframes = req.timeframes or ["1h"]
+    timeframes = req.timeframes or settings.timeframes  # one-click = every timeframe
     strategies = req.strategies or autoselect.all_strategy_names()
 
     bad_sym = [s for s in symbols if s not in settings.symbols]
@@ -221,7 +222,7 @@ def autoselect_endpoint(req: AutoSelectRequest, db: Session = Depends(get_db)) -
         db, symbols, timeframes, strategies, req.start, req.end,
         metric=req.metric, min_trades=req.min_trades,
         require_beat_buyhold=req.require_beat_buyhold, oos_check=req.oos_check,
-        cfg=cfg, top_n=req.top_n, promote=req.promote,
+        cfg=cfg, top_n=req.top_n, per_coin_top=req.per_coin_top, promote=req.promote,
     )
 
 

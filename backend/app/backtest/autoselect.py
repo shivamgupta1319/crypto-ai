@@ -20,8 +20,29 @@ from app.data.binance import load_candles
 from app.models import ActiveStrategy
 from app.strategies.base import all_strategies
 
-# Metrics a user may rank by (all "higher is better").
-RANK_METRICS = ("sharpe", "return_pct", "calmar", "sortino", "profit_factor")
+# Metrics a user may rank by (all "higher is better"). "composite" is a balanced
+# blend (default for one-click auto-select); the rest are single raw metrics.
+RANK_METRICS = ("composite", "sharpe", "return_pct", "calmar", "sortino", "profit_factor")
+
+
+def _composite(m: dict[str, Any]) -> float:
+    """Balanced quality score: rewards return + risk-adjusted return + confidence
+    (win rate, profit factor), and penalizes drawdown. Used so auto-select picks
+    strategies that are profitable *and* steady, not just high-return/high-risk."""
+    ret = (m.get("return_pct") or 0) / 100.0
+    dd = abs(m.get("max_drawdown_pct") or 0) / 100.0
+    sharpe = m.get("sharpe") or 0.0
+    win = (m.get("win_rate") or 0) / 100.0
+    pf = m.get("profit_factor")
+    pf_term = min(float(pf), 3.0) if pf is not None else 1.0
+    return round(sharpe + ret - 2.0 * dd + 0.5 * (win - 0.5) + 0.2 * pf_term, 4)
+
+
+def _score(m: dict[str, Any], metric: str) -> float:
+    if metric == "composite":
+        return _composite(m)
+    v = m.get(metric)
+    return float(v) if v is not None else float("-inf")
 
 
 def _iso_to_ms(value: str) -> int:
@@ -31,11 +52,6 @@ def _iso_to_ms(value: str) -> int:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
     return int(dt.timestamp() * 1000)
-
-
-def _metric(m: dict[str, Any], key: str) -> float:
-    v = m.get(key)
-    return float(v) if v is not None else float("-inf")
 
 
 def _red_flags(m: dict[str, Any]) -> list[str]:
@@ -64,11 +80,16 @@ def auto_select(
     oos_check: bool = True,
     cfg: BacktestConfig | None = None,
     top_n: int = 5,
+    per_coin_top: int | None = None,
     promote: bool = False,
 ) -> dict[str, Any]:
-    """Screen all combos, rank, and (optionally) promote the recommended top N."""
+    """Screen all combos, rank, and (optionally) promote the auto-selected picks.
+
+    Selection is either the recommended top ``top_n`` overall, or — when
+    ``per_coin_top`` is set — the best ``per_coin_top`` recommended pick(s) for
+    each coin (the one-click "let the system choose per coin" mode)."""
     cfg = cfg or BacktestConfig()
-    metric = metric if metric in RANK_METRICS else "sharpe"
+    metric = metric if metric in RANK_METRICS else "composite"
     start_ms, end_ms = _iso_to_ms(start), _iso_to_ms(end)
 
     candidates: list[dict[str, Any]] = []
@@ -97,13 +118,13 @@ def auto_select(
                     test_df = df.iloc[split:]
                     try:
                         tm = run_backtest(symbol, timeframe, test_df, strat, None, cfg).metrics
-                        oos_metric = _metric(tm, metric)
-                        oos_held_up = tm["return_pct"] > 0 and oos_metric > 0
+                        oos_metric = _score(tm, metric)
+                        oos_held_up = tm["return_pct"] > 0
                     except Exception:
                         oos_held_up = None
 
-                # Rank by OOS metric when available (more trustworthy), else full.
-                score = oos_metric if (oos_check and oos_metric is not None) else _metric(m, metric)
+                # Rank by the OOS score when available (more trustworthy), else full.
+                score = oos_metric if (oos_check and oos_metric is not None) else _score(m, metric)
 
                 reasons: list[str] = []
                 if m["total_trades"] < min_trades:
@@ -144,11 +165,22 @@ def auto_select(
     )
     recommended = [c for c in candidates if c["recommended"]]
 
-    promoted: list[dict[str, Any]] = []
-    if promote and recommended:
-        for c in recommended[: max(0, top_n)]:
-            _upsert_active(db, c["symbol"], c["timeframe"], c["strategy"])
-            promoted.append({"symbol": c["symbol"], "timeframe": c["timeframe"], "strategy": c["strategy"]})
+    # Selection: best per coin (one-click mode) or top-N overall.
+    if per_coin_top:
+        by_coin: dict[str, list[dict[str, Any]]] = {}
+        for c in recommended:  # already score-sorted
+            by_coin.setdefault(c["symbol"], []).append(c)
+        selected = [c for lst in by_coin.values() for c in lst[: max(1, per_coin_top)]]
+        selected.sort(
+            key=lambda c: c["score"] if c["score"] is not None else float("-inf"), reverse=True
+        )
+    else:
+        selected = recommended[: max(0, top_n)]
+
+    if promote and selected:
+        for c in selected:
+            c["active_id"] = _upsert_active(db, c["symbol"], c["timeframe"], c["strategy"])
+            c["promoted"] = True
         db.commit()
 
     return {
@@ -156,12 +188,14 @@ def auto_select(
         "combos_tested": len(candidates),
         "candidates": candidates,
         "recommended_count": len(recommended),
-        "promoted": promoted,
+        "selected": selected,
+        "promoted": [c for c in selected if c.get("promoted")] if promote else [],
         "top_n": top_n,
+        "per_coin_top": per_coin_top,
     }
 
 
-def _upsert_active(db: Session, symbol: str, timeframe: str, strategy: str) -> None:
+def _upsert_active(db: Session, symbol: str, timeframe: str, strategy: str) -> int:
     existing = db.execute(
         select(ActiveStrategy).where(
             ActiveStrategy.symbol == symbol,
@@ -172,9 +206,13 @@ def _upsert_active(db: Session, symbol: str, timeframe: str, strategy: str) -> N
     if existing:
         existing.enabled = 1
         existing.params_json = existing.params_json or "{}"
-    else:
-        db.add(ActiveStrategy(symbol=symbol, timeframe=timeframe, strategy=strategy,
-                              params_json=json.dumps({}), enabled=1))
+        db.flush()
+        return existing.id
+    row = ActiveStrategy(symbol=symbol, timeframe=timeframe, strategy=strategy,
+                         params_json=json.dumps({}), enabled=1)
+    db.add(row)
+    db.flush()
+    return row.id
 
 
 def all_strategy_names() -> list[str]:

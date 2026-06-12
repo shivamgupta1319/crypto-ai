@@ -264,6 +264,8 @@ export interface AutoSelectCandidate {
   flags: string[]
   recommended: boolean
   excluded_reasons: string[]
+  active_id?: number
+  promoted?: boolean
 }
 
 export interface AutoSelectResult {
@@ -271,8 +273,10 @@ export interface AutoSelectResult {
   combos_tested: number
   candidates: AutoSelectCandidate[]
   recommended_count: number
-  promoted: Array<{ symbol: string; timeframe: string; strategy: string }>
+  selected: AutoSelectCandidate[]
+  promoted: AutoSelectCandidate[]
   top_n: number
+  per_coin_top: number | null
 }
 
 export interface AutoSelectRequest {
@@ -286,6 +290,7 @@ export interface AutoSelectRequest {
   require_beat_buyhold?: boolean
   oos_check?: boolean
   top_n?: number
+  per_coin_top?: number
   promote?: boolean
   leverage?: number
 }

@@ -160,9 +160,7 @@ export default function Backtest() {
         </div>
       </div>
 
-      {showAutoSelect && config && (
-        <AutoSelectPanel config={config} start={start} end={end} leverage={leverage} />
-      )}
+      {showAutoSelect && <AutoSelectPanel />}
 
       {showRobustness && config && strategies.length > 0 && (
         <RobustnessPanel
