@@ -2,6 +2,8 @@
 (mocked httpx), and the pure context formatters."""
 from __future__ import annotations
 
+import pytest
+
 import app.ai as ai
 from app.ai import context as ctx
 
@@ -84,15 +86,57 @@ def test_openrouter_routing(monkeypatch):
     assert captured["headers"]["Authorization"] == "Bearer o"
 
 
-def test_complete_swallows_errors(monkeypatch):
+def test_complete_raises_on_error(monkeypatch):
     monkeypatch.setattr(ai.settings, "ai_provider", "gemini")
     monkeypatch.setattr(ai.settings, "gemini_api_key", "g")
+    monkeypatch.setattr(ai.settings, "openrouter_api_key", "")
 
     def boom(*a, **k):
         raise RuntimeError("network down")
 
     monkeypatch.setattr(ai.httpx, "post", boom)
-    assert ai.complete("x") is None  # never raises
+    with pytest.raises(ai.AIError):  # configured-but-failing now raises
+        ai.complete("x")
+
+
+def test_complete_falls_back_to_openrouter_on_429(monkeypatch):
+    # auto mode + both keys: a Gemini 429 should fall back to OpenRouter.
+    monkeypatch.setattr(ai.settings, "ai_provider", "auto")
+    monkeypatch.setattr(ai.settings, "gemini_api_key", "g")
+    monkeypatch.setattr(ai.settings, "openrouter_api_key", "o")
+
+    class _Req:
+        pass
+
+    class _Resp429:
+        status_code = 429
+
+    def fake_post(url, **kwargs):
+        if "generativelanguage" in url:
+            raise ai.httpx.HTTPStatusError("429", request=_Req(), response=_Resp429())
+        return _Resp({"choices": [{"message": {"content": "fallback answer"}}]})
+
+    monkeypatch.setattr(ai.httpx, "post", fake_post)
+    assert ai.complete("q") == "fallback answer"
+
+
+def test_all_providers_rate_limited_raises(monkeypatch):
+    monkeypatch.setattr(ai.settings, "ai_provider", "gemini")
+    monkeypatch.setattr(ai.settings, "gemini_api_key", "g")
+    monkeypatch.setattr(ai.settings, "openrouter_api_key", "")
+
+    class _Req:
+        pass
+
+    class _Resp429:
+        status_code = 429
+
+    def fake_post(url, **kwargs):
+        raise ai.httpx.HTTPStatusError("429", request=_Req(), response=_Resp429())
+
+    monkeypatch.setattr(ai.httpx, "post", fake_post)
+    with pytest.raises(ai.AIRateLimited):
+        ai.complete("x")
 
 
 # --- context formatters (pure) -----------------------------------------------

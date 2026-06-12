@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.ai import ai_status, complete
+from app.ai import AIError, AIRateLimited, ai_status, complete
 from app.ai import context as ctx
 from app.config import settings
 from app.db.session import get_db
@@ -38,6 +38,20 @@ def _disabled_payload() -> dict[str, Any]:
         "hint": "AI is not configured. Add CRYPTOAI_GEMINI_API_KEY or "
         "CRYPTOAI_OPENROUTER_API_KEY to backend/.env (both have free tiers).",
     }
+
+
+def _complete_or_http(prompt: str) -> str:
+    """Run a completion, mapping provider failures to clean HTTP errors:
+    429 for rate limits (so the UI says 'wait a minute'), 502 otherwise."""
+    try:
+        text = complete(prompt)
+    except AIRateLimited as exc:
+        raise HTTPException(429, str(exc)) from exc
+    except AIError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    if text is None:
+        raise HTTPException(502, "AI provider returned no response. Try again shortly.")
+    return text
 
 
 class AskRequest(BaseModel):
@@ -81,9 +95,7 @@ def commentary(refresh: bool = False, db: Session = Depends(get_db)) -> dict[str
         f"=== MY POSITIONS ===\n{ctx.format_positions(positions)}\n\n"
         f"=== NEWS ===\n{ctx.format_news(news)}\n"
     )
-    text = complete(prompt)
-    if text is None:
-        raise HTTPException(502, "AI provider returned no response. Try again shortly.")
+    text = _complete_or_http(prompt)
 
     payload = {**ai_status(), "text": text, "generated_at": now, "cached": False}
     _commentary_cache["payload"] = payload
@@ -114,9 +126,7 @@ def ask(req: AskRequest, db: Session = Depends(get_db)) -> dict[str, Any]:
         f"=== RECENT CLOSED TRADES ===\n{recent_lines}\n\n"
         f"=== QUESTION ===\n{req.question.strip()}\n"
     )
-    text = complete(prompt)
-    if text is None:
-        raise HTTPException(502, "AI provider returned no response. Try again shortly.")
+    text = _complete_or_http(prompt)
     return {**ai_status(), "text": text, "question": req.question.strip()}
 
 
@@ -149,7 +159,5 @@ def backtest_explain(req: ExplainRequest, db: Session = Depends(get_db)) -> dict
         "walk-forward). Be skeptical, not promotional.\n\n"
         f"{ctx.format_backtest_run(run_dict)}\n"
     )
-    text = complete(prompt)
-    if text is None:
-        raise HTTPException(502, "AI provider returned no response. Try again shortly.")
+    text = _complete_or_http(prompt)
     return {**ai_status(), "text": text, "run_id": req.run_id}

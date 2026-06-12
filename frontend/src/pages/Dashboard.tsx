@@ -127,7 +127,6 @@ export default function Dashboard() {
             <AiInsightCard
               title="AI Market Commentary"
               buttonLabel="Generate"
-              auto
               run={() => api.aiCommentary()}
             />
           </div>

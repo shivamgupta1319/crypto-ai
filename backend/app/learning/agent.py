@@ -211,7 +211,10 @@ def _narrative(db: Session, alloc: dict[str, Any], pending: list[dict[str, Any]]
         + "\n".join(lines)
         + f"\n\nProposed changes awaiting approval:\n{prop_lines}\n"
     )
-    text = ai.complete(prompt)
+    try:
+        text = ai.complete(prompt)
+    except ai.AIError:
+        text = None  # rate-limited or provider error — skip the narrative this cycle
     if text:
         _narrative_cache.update(text=text, at=now)
     return text
