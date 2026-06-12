@@ -19,8 +19,12 @@ export default function AutoSelectPanel() {
   const [picks, setPicks] = useState<AutoSelectCandidate[]>([])
   const [loading, setLoading] = useState(false)
   const [removing, setRemoving] = useState<number | null>(null)
+  const [adding, setAdding] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [showAll, setShowAll] = useState(false)
+
+  const comboKey = (c: AutoSelectCandidate) => `${c.symbol}|${c.timeframe}|${c.strategy}`
+  const selected = new Map(picks.map((p) => [comboKey(p), p]))
 
   async function run() {
     setLoading(true)
@@ -54,6 +58,22 @@ export default function AutoSelectPanel() {
       setError((e as Error).message)
     } finally {
       setRemoving(null)
+    }
+  }
+
+  // Manually promote any tested combo the user wants (beyond the auto-picks).
+  async function addManual(c: AutoSelectCandidate) {
+    const key = comboKey(c)
+    if (selected.has(key)) return
+    setAdding(key)
+    setError(null)
+    try {
+      const row = await api.promote({ symbol: c.symbol, timeframe: c.timeframe, strategy: c.strategy })
+      setPicks((cur) => [...cur, { ...c, active_id: row.id, promoted: true }])
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setAdding(null)
     }
   }
 
@@ -162,11 +182,14 @@ export default function AutoSelectPanel() {
                     <th className="py-1 pr-3">Coin</th><th className="py-1 pr-3">Strategy</th>
                     <th className="py-1 pr-3">TF</th><th className="py-1 pr-3">Score</th>
                     <th className="py-1 pr-3">Return</th><th className="py-1 pr-3">Max DD</th>
-                    <th className="py-1 pr-3">Notes</th>
+                    <th className="py-1 pr-3">Notes</th><th className="py-1 pr-3"></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {res.candidates.map((c, i) => (
+                  {res.candidates.map((c, i) => {
+                    const key = comboKey(c)
+                    const pick = selected.get(key)
+                    return (
                     <tr key={i} className={`border-t border-slate-800 ${c.recommended ? 'text-slate-200' : 'text-slate-500'}`}>
                       <td className="py-1 pr-3">{c.symbol.replace('USDT', '')}</td>
                       <td className="py-1 pr-3">{c.strategy}</td>
@@ -175,8 +198,27 @@ export default function AutoSelectPanel() {
                       <td className="py-1 pr-3">{c.return_pct}%</td>
                       <td className="py-1 pr-3">{c.max_drawdown_pct}%</td>
                       <td className="py-1 pr-3">{c.recommended ? '✓ selected-eligible' : c.excluded_reasons.join(', ')}</td>
+                      <td className="py-1 pr-3">
+                        {pick ? (
+                          <button
+                            onClick={() => remove(pick)}
+                            disabled={removing === pick.active_id}
+                            className="px-2 py-0.5 rounded text-[11px] bg-rose-500/20 text-rose-300 border border-rose-500/40 disabled:opacity-50"
+                          >
+                            {removing === pick.active_id ? '…' : '✓ remove'}
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => addManual(c)}
+                            disabled={adding === key}
+                            className="px-2 py-0.5 rounded text-[11px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 disabled:opacity-50"
+                          >
+                            {adding === key ? '…' : 'Add'}
+                          </button>
+                        )}
+                      </td>
                     </tr>
-                  ))}
+                  )})}
                 </tbody>
               </table>
             </div>
