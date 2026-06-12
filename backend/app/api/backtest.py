@@ -194,8 +194,10 @@ class AutoSelectRequest(BaseModel):
 def autoselect_endpoint(req: AutoSelectRequest, db: Session = Depends(get_db)) -> dict:
     """Screen every coin × strategy × timeframe over a window, rank by performance
     with anti-overfit gates, and optionally auto-promote the recommended top N."""
+    # One-click default: swing timeframes only (skip noisy/heavy sub-15m like 5m).
+    auto_tfs = [t for t in ("15m", "1h", "4h", "1d") if t in settings.timeframes]
     symbols = req.symbols or settings.symbols
-    timeframes = req.timeframes or settings.timeframes  # one-click = every timeframe
+    timeframes = req.timeframes or auto_tfs or settings.timeframes
     strategies = req.strategies or autoselect.all_strategy_names()
 
     bad_sym = [s for s in symbols if s not in settings.symbols]

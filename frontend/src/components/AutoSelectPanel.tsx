@@ -63,10 +63,10 @@ export default function AutoSelectPanel() {
         <div>
           <div className="font-medium">Auto-Select</div>
           <p className="text-sm text-slate-400 mt-1 max-w-2xl">
-            One click: backtests <strong>every coin × strategy × timeframe</strong> over the last
-            year, scores each on a balanced metric (return, drawdown, win-rate, risk-adjusted
-            return), validates out-of-sample, and <strong>auto-promotes the best per coin</strong> to
-            live signals. Remove any you don't want.
+            One click: backtests <strong>every coin × strategy</strong> across the swing timeframes
+            (15m / 1h / 4h / 1d) over the last year, scores each on a balanced metric (return,
+            drawdown, win-rate, risk-adjusted return), validates out-of-sample, and{' '}
+            <strong>auto-promotes the best per coin</strong> to live signals. Remove any you don't want.
           </p>
         </div>
         <button
