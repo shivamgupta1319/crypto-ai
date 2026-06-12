@@ -4,6 +4,11 @@
 services:
   backend:
     build: ./backend
+    # Load API keys / alert creds from backend/.env into the container (gitignored).
+    # Optional: the stack still boots without the file (AI/alerts just stay off).
+    env_file:
+      - path: ./backend/.env
+        required: false
     environment:
       - CRYPTOAI_DB_PATH=/data/cryptoai.db
     volumes:
