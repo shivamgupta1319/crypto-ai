@@ -89,6 +89,8 @@ def _apply(db: Session, p: AgentProposal) -> None:
         _set_enabled(db, payload["strategy"], True)
     elif p.kind == "set_size_multiplier":
         levers.set_multiplier(db, payload["strategy"], payload["multiplier"])
+    elif p.kind == "set_regime_multiplier":
+        levers.set_regime_multiplier(db, payload["strategy"], payload["regime"], payload["multiplier"])
     elif p.kind == "set_meta_threshold":
         _persist_setting(db, "meta_label_threshold", payload["threshold"])
     elif p.kind == "set_meta_enabled":
@@ -115,6 +117,10 @@ def _revert(db: Session, p: AgentProposal) -> None:
         _set_enabled(db, payload["strategy"], bool(prev.get("enabled", True)))
     elif p.kind == "set_size_multiplier":
         levers.set_multiplier(db, payload["strategy"], float(prev.get("multiplier", 1.0)))
+    elif p.kind == "set_regime_multiplier":
+        levers.set_regime_multiplier(
+            db, payload["strategy"], payload["regime"], float(prev.get("multiplier", 1.0))
+        )
     elif p.kind == "set_meta_threshold":
         _persist_setting(db, "meta_label_threshold", prev.get("threshold", settings.meta_label_threshold))
     elif p.kind == "set_meta_enabled":

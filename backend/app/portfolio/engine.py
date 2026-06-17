@@ -201,7 +201,45 @@ def manage_open_trades(db: Session, price_cache: dict[str, float]) -> list[dict[
     return closed_events
 
 
-def open_from_signal(db: Session, sig: dict[str, Any]) -> dict[str, Any] | None:
+def _correlation_lookup() -> dict[tuple[str, str], float]:
+    """Pairwise return-correlation between universe symbols for this cycle.
+
+    Computed once per cycle (best-effort) and reused for every signal so the
+    correlation guard doesn't reload candles per entry. Empty when disabled or
+    unavailable, which makes the guard a no-op."""
+    if not settings.correlation_guard_enabled:
+        return {}
+    try:
+        from app.market import correlation_matrix
+
+        m = correlation_matrix()
+        if not m.get("available"):
+            return {}
+        syms, mat = m["symbols"], m["matrix"]
+        return {(a, b): mat[i][j] for i, a in enumerate(syms) for j, b in enumerate(syms)}
+    except Exception:  # noqa: BLE001 — guard is advisory; never break the cycle
+        return {}
+
+
+def _correlation_scale(
+    db: Session, symbol: str, direction: str, corr_lookup: dict[tuple[str, str], float] | None
+) -> float:
+    """Scale factor (<=1) when ``symbol`` is highly correlated and same-direction
+    with an already-open position — concentration control. 1.0 when no conflict."""
+    if not settings.correlation_guard_enabled or not corr_lookup:
+        return 1.0
+    for t in open_trades(db):
+        if t.symbol == symbol or t.direction != direction:
+            continue
+        corr = corr_lookup.get((symbol, t.symbol))
+        if corr is not None and corr >= settings.correlation_threshold:
+            return max(0.0, min(1.0, settings.correlation_scale))
+    return 1.0
+
+
+def open_from_signal(
+    db: Session, sig: dict[str, Any], corr_lookup: dict[tuple[str, str], float] | None = None
+) -> dict[str, Any] | None:
     """Open a paper position from a scanner signal if risk checks pass."""
     if not _can_open(db, sig["symbol"], sig["strategy"]):
         return None
@@ -221,10 +259,14 @@ def open_from_signal(db: Session, sig: dict[str, Any]) -> dict[str, Any] | None:
         equity, sig["entry"], sig["stop"], settings.risk_per_trade_pct,
         leverage, settings.max_position_pct,
     )
-    # Agent size multiplier (bounded lever; 1.0 when none set).
-    from app.learning.levers import size_multiplier_safe
+    # Agent levers (bounded; 1.0 when none set): per-strategy size, then a
+    # per-regime multiplier for the signal's current market regime.
+    from app.learning.levers import regime_multiplier_safe, size_multiplier_safe
 
     qty *= size_multiplier_safe(sig["strategy"])
+    qty *= regime_multiplier_safe(sig["strategy"], sig.get("regime", "ranging"))
+    # Correlation guard: scale down when concentrated with the open book.
+    qty *= _correlation_scale(db, sig["symbol"], sig["direction"], corr_lookup)
     if qty <= 0:
         return None
 
@@ -278,9 +320,10 @@ def run_paper_cycle(db: Session, new_signals: list[dict[str, Any]]) -> dict[str,
     price_cache = _price_cache(symbols)
 
     closed = manage_open_trades(db, price_cache)
+    corr_lookup = _correlation_lookup() if new_signals else {}
     opened: list[dict[str, Any]] = []
     for sig in new_signals:
-        ev = open_from_signal(db, sig)
+        ev = open_from_signal(db, sig, corr_lookup)
         if ev:
             opened.append(ev)
     # Snapshot after fills settle so the equity time-series reflects this cycle.

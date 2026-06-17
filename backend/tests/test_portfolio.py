@@ -274,3 +274,45 @@ def test_liquidation_price_accounts_for_maintenance_margin(monkeypatch):
 
 def test_liquidation_price_guards_zero_leverage():
     assert pe._liquidation_price("LONG", 100.0, 0.0) == 100.0
+
+
+# --- regime-adaptive + correlation-aware sizing ------------------------------
+def test_regime_multiplier_scales_position_size(db, fake_broker, monkeypatch):
+    from app.learning import levers
+    monkeypatch.setattr(levers, "regime_multiplier_safe", lambda strat, reg: 0.5)
+    pe.open_from_signal(db, {**_sig(), "regime": "ranging"})
+    # Base qty 500 (1% risk / 2.0 stop) halved by the regime multiplier.
+    assert pe.open_trades(db)[0].qty == pytest.approx(250.0)
+
+
+def test_correlation_guard_scales_down_correlated_entry(db, fake_broker, monkeypatch):
+    monkeypatch.setattr(settings, "correlation_guard_enabled", True)
+    monkeypatch.setattr(settings, "correlation_threshold", 0.8)
+    monkeypatch.setattr(settings, "correlation_scale", 0.5)
+    pe.open_from_signal(db, _sig(symbol="BTCUSDT"))  # existing long
+    corr = {("ETHUSDT", "BTCUSDT"): 0.9, ("BTCUSDT", "ETHUSDT"): 0.9}
+    pe.open_from_signal(db, {**_sig(symbol="ETHUSDT"), "strategy": "macd_rsi"}, corr)
+    eth = next(t for t in pe.open_trades(db) if t.symbol == "ETHUSDT")
+    assert eth.qty == pytest.approx(250.0)  # 500 * 0.5 (correlated + same direction)
+
+
+def test_correlation_guard_noop_below_threshold(db, fake_broker, monkeypatch):
+    monkeypatch.setattr(settings, "correlation_threshold", 0.8)
+    pe.open_from_signal(db, _sig(symbol="BTCUSDT"))
+    corr = {("ETHUSDT", "BTCUSDT"): 0.3, ("BTCUSDT", "ETHUSDT"): 0.3}
+    pe.open_from_signal(db, {**_sig(symbol="ETHUSDT"), "strategy": "macd_rsi"}, corr)
+    eth = next(t for t in pe.open_trades(db) if t.symbol == "ETHUSDT")
+    assert eth.qty == pytest.approx(500.0)  # uncorrelated → full size
+
+
+def test_correlation_guard_ignores_opposite_direction(db, fake_broker, monkeypatch):
+    monkeypatch.setattr(settings, "correlation_threshold", 0.8)
+    pe.open_from_signal(db, _sig(symbol="BTCUSDT", direction="LONG"))
+    corr = {("ETHUSDT", "BTCUSDT"): 0.9, ("BTCUSDT", "ETHUSDT"): 0.9}
+    # Opposite direction is a hedge, not concentration → not scaled.
+    pe.open_from_signal(
+        db, {**_sig(symbol="ETHUSDT", direction="SHORT", stop=102.0, target=96.0),
+             "strategy": "macd_rsi"}, corr,
+    )
+    eth = next(t for t in pe.open_trades(db) if t.symbol == "ETHUSDT")
+    assert eth.qty == pytest.approx(500.0)

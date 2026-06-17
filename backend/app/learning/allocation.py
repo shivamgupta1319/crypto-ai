@@ -96,4 +96,22 @@ def propose(db: Session) -> list[dict[str, Any]]:
                 "prev": {"multiplier": 1.0},
                 "confidence": 0.6,
             })
+
+    # Per-regime weak spots: a strategy that loses badly in a specific regime gets
+    # a proposed size reduction *in that regime only* (bounded lever).
+    for strat, regimes in per_regime_winrate(db).items():
+        for reg, stat in regimes.items():
+            if stat["samples"] >= MIN_TRADES_TO_JUDGE and stat["win_rate"] < 35:
+                proposals.append({
+                    "kind": "set_regime_multiplier",
+                    "title": f"Reduce {strat} size in {reg} to 0.5x",
+                    "rationale": (
+                        f"{strat} wins only {stat['win_rate']}% in {reg} over "
+                        f"{stat['samples']} samples — proposing a 0.5x size multiplier "
+                        f"in that regime (bounded at {MIN_MULT}x)."
+                    ),
+                    "payload": {"strategy": strat, "regime": reg, "multiplier": 0.5},
+                    "prev": {"multiplier": 1.0},
+                    "confidence": 0.55,
+                })
     return proposals
