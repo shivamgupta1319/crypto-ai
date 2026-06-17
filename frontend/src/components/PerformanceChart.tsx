@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { createChart, ColorType, LineSeries, AreaSeries, type IChartApi } from 'lightweight-charts'
+import { normalizeSeconds } from './chartUtils'
 
 export interface ChartPoint {
   time: number // ms epoch
@@ -38,8 +39,7 @@ export default function PerformanceChart({
     chartRef.current = chart
 
     for (const s of series) {
-      // lightweight-charts expects ascending unix seconds.
-      const data = s.data.map((p) => ({ time: Math.floor(p.time / 1000) as never, value: p.value }))
+      const data = normalizeSeconds(s.data).map((p) => ({ time: p.time as never, value: p.value }))
       if (s.type === 'area') {
         const area = chart.addSeries(AreaSeries, {
           lineColor: s.color,

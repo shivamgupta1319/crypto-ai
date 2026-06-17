@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { createChart, ColorType, LineSeries, type IChartApi } from 'lightweight-charts'
 import type { EquityPoint } from '../api/client'
+import { normalizeSeconds } from './chartUtils'
 
 // Renders one or more equity curves on a single chart.
 export default function EquityChart({
@@ -25,10 +26,8 @@ export default function EquityChart({
 
     for (const s of series) {
       const line = chart.addSeries(LineSeries, { color: s.color, lineWidth: 2 })
-      line.setData(
-        // lightweight-charts expects ascending unix seconds.
-        s.data.map((p) => ({ time: Math.floor(p.time / 1000) as never, value: p.equity })),
-      )
+      const data = normalizeSeconds(s.data.map((p) => ({ time: p.time, value: p.equity })))
+      line.setData(data.map((p) => ({ time: p.time as never, value: p.value })))
     }
     chart.timeScale().fitContent()
 
