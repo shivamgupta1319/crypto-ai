@@ -57,6 +57,15 @@ export interface EquityPoint {
   equity: number
 }
 
+export interface PortfolioHistoryPoint {
+  time: number
+  equity: number
+  realized_balance: number
+  unrealized_pnl: number
+  open_positions: number
+  kill_switch: boolean
+}
+
 export interface StrategyResult {
   strategy: string
   metrics: Metrics
@@ -444,6 +453,8 @@ export const api = {
   getPositions: () => http<OpenPosition[]>('/api/portfolio/positions'),
   getTrades: (limit = 100) => http<ClosedTrade[]>(`/api/portfolio/trades?limit=${limit}`),
   getPortfolioEquity: () => http<EquityPoint[]>('/api/portfolio/equity-curve'),
+  getPortfolioHistory: (limit = 2000) =>
+    http<PortfolioHistoryPoint[]>(`/api/portfolio/history?limit=${limit}`),
   getAttribution: () => http<StrategyAttribution[]>('/api/portfolio/attribution'),
   getRisk: () => http<RiskView>('/api/portfolio/risk'),
   resetAccount: () => http<{ deleted: number }>('/api/portfolio/reset', { method: 'POST' }),
