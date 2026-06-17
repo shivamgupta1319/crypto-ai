@@ -169,6 +169,26 @@ class Setting(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
+class PortfolioSnapshot(Base):
+    """A point-in-time paper-account snapshot recorded each scan cycle.
+
+    Unlike the closed-trade-derived ``equity_curve``, this captures *unrealized*
+    P&L too, so the equity time-series reflects open-position swings between fills
+    and is auditable later without re-deriving it.
+    """
+
+    __tablename__ = "portfolio_snapshots"
+    __table_args__ = (Index("ix_snapshot_time", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    realized_balance: Mapped[float] = mapped_column(Float, nullable=False)
+    unrealized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    equity: Mapped[float] = mapped_column(Float, nullable=False)
+    open_positions: Mapped[int] = mapped_column(Integer, default=0)
+    kill_switch: Mapped[bool] = mapped_column(Integer, default=0)
+
+
 class PaperTrade(Base):
     """A paper trade lifecycle row (open -> closed). P&L stored on close."""
 

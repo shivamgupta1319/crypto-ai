@@ -5,13 +5,25 @@ import {
   type ClosedTrade,
   type EquityPoint,
   type OpenPosition,
+  type PortfolioHistoryPoint,
   type RiskView,
   type StrategyAttribution,
 } from '../api/client'
 import { Badge, Card, PageTitle, Stat } from '../components/ui'
 import EquityChart from '../components/EquityChart'
+import PerformanceChart, { type ChartPoint } from '../components/PerformanceChart'
 import { AskAiCard } from '../components/AskAiCard'
 import { useWsEvents } from '../hooks/useWsEvents'
+
+// Drawdown % from peak, computed from the persisted equity snapshots.
+function computeDrawdown(hist: PortfolioHistoryPoint[]): ChartPoint[] {
+  let peak = -Infinity
+  return hist.map((h) => {
+    peak = Math.max(peak, h.equity)
+    const dd = peak > 0 ? ((h.equity - peak) / peak) * 100 : 0
+    return { time: h.time, value: Number(dd.toFixed(2)) }
+  })
+}
 
 const POLL_MS = 5000
 
@@ -24,6 +36,7 @@ export default function Portfolio() {
   const [positions, setPositions] = useState<OpenPosition[]>([])
   const [trades, setTrades] = useState<ClosedTrade[]>([])
   const [equity, setEquity] = useState<EquityPoint[]>([])
+  const [history, setHistory] = useState<PortfolioHistoryPoint[]>([])
   const [attribution, setAttribution] = useState<StrategyAttribution[]>([])
   const [risk, setRisk] = useState<RiskView | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -31,15 +44,16 @@ export default function Portfolio() {
   const refresh = useCallback(() => {
     Promise.all([
       api.getSummary(), api.getPositions(), api.getTrades(), api.getPortfolioEquity(),
-      api.getAttribution(), api.getRisk(),
+      api.getAttribution(), api.getRisk(), api.getPortfolioHistory(),
     ])
-      .then(([s, p, t, e, a, r]) => {
+      .then(([s, p, t, e, a, r, h]) => {
         setSummary(s)
         setPositions(p)
         setTrades(t)
         setEquity(e)
         setAttribution(a)
         setRisk(r)
+        setHistory(h)
         setError(null)
       })
       .catch((err) => setError(String(err.message)))
@@ -138,6 +152,40 @@ export default function Portfolio() {
         </Card>
       )}
 
+      {/* Performance analytics from persisted per-cycle snapshots (incl. unrealized) */}
+      {history.length > 1 && (() => {
+        const drawdown = computeDrawdown(history)
+        const maxDd = Math.min(0, ...drawdown.map((d) => d.value))
+        const peakEquity = Math.max(...history.map((h) => h.equity))
+        return (
+          <div className="grid lg:grid-cols-2 gap-4 mb-6">
+            <Card>
+              <div className="font-medium mb-3">Equity over time (incl. unrealized)</div>
+              <PerformanceChart
+                series={[
+                  { label: 'equity', color: '#34d399', type: 'line', data: history.map((h) => ({ time: h.time, value: h.equity })) },
+                  { label: 'realized', color: '#60a5fa', type: 'line', data: history.map((h) => ({ time: h.time, value: h.realized_balance })) },
+                ]}
+              />
+              <p className="text-xs text-slate-500 mt-2">
+                <span className="text-emerald-400">equity</span> tracks open-position swings;{' '}
+                <span className="text-sky-400">realized</span> is balance from closed trades only.
+              </p>
+            </Card>
+            <Card>
+              <div className="flex items-center justify-between mb-3">
+                <span className="font-medium">Drawdown from peak</span>
+                <div className="flex gap-4">
+                  <Stat label="Peak equity" value={`${peakEquity.toLocaleString()} ${cur}`} />
+                  <Stat label="Max drawdown" value={`${maxDd.toFixed(2)}%`} tone={maxDd < 0 ? 'neg' : undefined} />
+                </div>
+              </div>
+              <PerformanceChart series={[{ label: 'drawdown', color: '#f43f5e', type: 'area', data: drawdown }]} />
+            </Card>
+          </div>
+        )
+      })()}
+
       <div className="mb-6">
         <AskAiCard />
       </div>
@@ -176,7 +224,7 @@ export default function Portfolio() {
               </tbody>
             </table>
           </div>
-          <p className="text-xs text-slate-500 mt-2">Liquidation price is a rough estimate (ignores maintenance margin/fees).</p>
+          <p className="text-xs text-slate-500 mt-2">Liquidation price is an estimate (isolated margin + maintenance margin; ignores fees).</p>
         </Card>
       )}
 

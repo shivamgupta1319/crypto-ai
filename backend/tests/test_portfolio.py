@@ -204,3 +204,115 @@ def test_funding_accrues_over_time(db, fake_broker):
     t.opened_at = datetime.now(UTC) - timedelta(hours=24)
     db.commit()
     assert pe._funding_accrued(t) > 0
+
+
+# --- persisted equity snapshots ----------------------------------------------
+def test_run_paper_cycle_records_snapshot(db, fake_broker):
+    fake_broker.prices["BTCUSDT"] = 102.0
+    pe.run_paper_cycle(db, [_sig()])  # opens one position, then snapshots
+    hist = pe.snapshot_history(db)
+    assert len(hist) == 1
+    snap = hist[0]
+    assert snap["open_positions"] == 1
+    # equity = realized balance + unrealized (price moved up on a long)
+    assert snap["unrealized_pnl"] > 0
+    assert snap["equity"] == pytest.approx(snap["realized_balance"] + snap["unrealized_pnl"])
+
+
+def test_snapshot_history_orders_oldest_first_and_limits(db, fake_broker):
+    fake_broker.prices["BTCUSDT"] = 100.0
+    for _ in range(3):
+        pe.record_snapshot(db, {"BTCUSDT": 100.0})
+    hist = pe.snapshot_history(db, limit=2)
+    assert len(hist) == 2
+    assert hist[0]["time"] <= hist[1]["time"]  # oldest first
+
+
+# --- price-fetch outage hardening --------------------------------------------
+def test_price_cache_falls_back_to_last_known(db, fake_broker, monkeypatch):
+    monkeypatch.setattr(pe, "_last_known_price", {}, raising=False)
+    monkeypatch.setattr(pe, "_consec_fetch_failures", {}, raising=False)
+    fake_broker.prices["BTCUSDT"] = 100.0
+    assert pe._price_cache({"BTCUSDT"}) == {"BTCUSDT": 100.0}  # primes last-known
+
+    # Feed goes down: get_price raises, but the cache still serves the stale price
+    # so open positions keep getting their stops/targets checked.
+    def boom(symbol):
+        raise RuntimeError("feed down")
+
+    monkeypatch.setattr(fake_broker, "get_price", boom)
+    assert pe._price_cache({"BTCUSDT"}) == {"BTCUSDT": 100.0}
+
+
+def test_stops_still_managed_during_outage(db, fake_broker, monkeypatch):
+    monkeypatch.setattr(pe, "_last_known_price", {}, raising=False)
+    monkeypatch.setattr(pe, "_consec_fetch_failures", {}, raising=False)
+    pe.open_from_signal(db, _sig(entry=100.0, stop=98.0, target=104.0))
+    pe._price_cache({"BTCUSDT"})  # prime with the entry price (100.0)
+    fake_broker.prices["BTCUSDT"] = 97.0  # would breach the stop...
+
+    def boom(symbol):
+        raise RuntimeError("feed down")
+
+    monkeypatch.setattr(fake_broker, "get_price", boom)
+    # Feed is down, so the cache serves the last-known 100.0 (no stop breach) —
+    # the position is still evaluated, just not closed at this stale price.
+    closed = pe.run_paper_cycle(db, [])["closed"]
+    assert closed == []
+    assert len(pe.open_trades(db)) == 1
+
+
+# --- liquidation price --------------------------------------------------------
+def test_liquidation_price_accounts_for_maintenance_margin(monkeypatch):
+    monkeypatch.setattr(settings, "maintenance_margin_pct", 0.5)
+    # Long 10x: adverse move at liq = 1/10 - 0.005 = 0.095 → 100 * 0.905.
+    assert pe._liquidation_price("LONG", 100.0, 10.0) == pytest.approx(90.5)
+    assert pe._liquidation_price("SHORT", 100.0, 10.0) == pytest.approx(109.5)
+    # Liquidation sits closer to entry than the naive 1/leverage estimate.
+    assert pe._liquidation_price("LONG", 100.0, 10.0) > 100.0 * (1 - 1 / 10.0)
+
+
+def test_liquidation_price_guards_zero_leverage():
+    assert pe._liquidation_price("LONG", 100.0, 0.0) == 100.0
+
+
+# --- regime-adaptive + correlation-aware sizing ------------------------------
+def test_regime_multiplier_scales_position_size(db, fake_broker, monkeypatch):
+    from app.learning import levers
+    monkeypatch.setattr(levers, "regime_multiplier_safe", lambda strat, reg: 0.5)
+    pe.open_from_signal(db, {**_sig(), "regime": "ranging"})
+    # Base qty 500 (1% risk / 2.0 stop) halved by the regime multiplier.
+    assert pe.open_trades(db)[0].qty == pytest.approx(250.0)
+
+
+def test_correlation_guard_scales_down_correlated_entry(db, fake_broker, monkeypatch):
+    monkeypatch.setattr(settings, "correlation_guard_enabled", True)
+    monkeypatch.setattr(settings, "correlation_threshold", 0.8)
+    monkeypatch.setattr(settings, "correlation_scale", 0.5)
+    pe.open_from_signal(db, _sig(symbol="BTCUSDT"))  # existing long
+    corr = {("ETHUSDT", "BTCUSDT"): 0.9, ("BTCUSDT", "ETHUSDT"): 0.9}
+    pe.open_from_signal(db, {**_sig(symbol="ETHUSDT"), "strategy": "macd_rsi"}, corr)
+    eth = next(t for t in pe.open_trades(db) if t.symbol == "ETHUSDT")
+    assert eth.qty == pytest.approx(250.0)  # 500 * 0.5 (correlated + same direction)
+
+
+def test_correlation_guard_noop_below_threshold(db, fake_broker, monkeypatch):
+    monkeypatch.setattr(settings, "correlation_threshold", 0.8)
+    pe.open_from_signal(db, _sig(symbol="BTCUSDT"))
+    corr = {("ETHUSDT", "BTCUSDT"): 0.3, ("BTCUSDT", "ETHUSDT"): 0.3}
+    pe.open_from_signal(db, {**_sig(symbol="ETHUSDT"), "strategy": "macd_rsi"}, corr)
+    eth = next(t for t in pe.open_trades(db) if t.symbol == "ETHUSDT")
+    assert eth.qty == pytest.approx(500.0)  # uncorrelated → full size
+
+
+def test_correlation_guard_ignores_opposite_direction(db, fake_broker, monkeypatch):
+    monkeypatch.setattr(settings, "correlation_threshold", 0.8)
+    pe.open_from_signal(db, _sig(symbol="BTCUSDT", direction="LONG"))
+    corr = {("ETHUSDT", "BTCUSDT"): 0.9, ("BTCUSDT", "ETHUSDT"): 0.9}
+    # Opposite direction is a hedge, not concentration → not scaled.
+    pe.open_from_signal(
+        db, {**_sig(symbol="ETHUSDT", direction="SHORT", stop=102.0, target=96.0),
+             "strategy": "macd_rsi"}, corr,
+    )
+    eth = next(t for t in pe.open_trades(db) if t.symbol == "ETHUSDT")
+    assert eth.qty == pytest.approx(500.0)

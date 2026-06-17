@@ -37,11 +37,21 @@ class Settings(BaseSettings):
     max_concurrent_positions: int = 5
     max_position_pct: float = 30.0      # max notional as % of equity (pre-leverage)
     daily_max_loss_pct: float = 5.0     # kill switch: stop new trades for the day
+    # Exchange maintenance-margin rate (% of notional); used only to estimate the
+    # liquidation price more realistically than the naive initial-margin formula.
+    maintenance_margin_pct: float = 0.5
     # Trailing stop: once price moves trail_activate_pct in favor, ratchet the stop
     # to trail_distance_pct behind the current price (never loosens).
     trailing_enabled: bool = True
     trail_activate_pct: float = 1.0
     trail_distance_pct: float = 1.0
+
+    # Correlation guard: when a new entry is highly correlated *and* same-direction
+    # with the open book, scale its size down (concentration control). Reuses the
+    # market correlation matrix; applied once per scan cycle.
+    correlation_guard_enabled: bool = True
+    correlation_threshold: float = 0.8   # Pearson corr of returns above which to scale down
+    correlation_scale: float = 0.5       # size multiplier applied when the guard trips
 
     # --- Live scanner ---
     scan_interval_seconds: int = 60

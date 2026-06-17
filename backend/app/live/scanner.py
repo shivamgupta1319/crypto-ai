@@ -185,6 +185,11 @@ def scan_active() -> list[dict[str, Any]]:
             # score this signal (only when the filter is enabled).
             if settings.meta_label_enabled:
                 payload["features"] = _features_at(df, hit["bar_time"])
+            # Current market regime, so the paper-trader can apply a per-regime
+            # size multiplier (cheap — computed on the already-loaded frame).
+            from app.regime import current_regime
+
+            payload["regime"] = current_regime(df)
             new_signals.append(payload)
 
     return new_signals

@@ -7,6 +7,7 @@ logic will guard live trading in Phase 5 — only the broker swaps.
 """
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from typing import Any
 
@@ -17,10 +18,20 @@ from app.broker.base import BrokerInterface
 from app.broker.paper import PaperBroker
 from app.config import settings
 from app.db.session import SessionLocal
-from app.models import PaperTrade
+from app.models import PaperTrade, PortfolioSnapshot
 from app.portfolio.sizing import size_position
 
+logger = logging.getLogger(__name__)
+
 broker: BrokerInterface = PaperBroker()
+
+# Last successfully-fetched price per symbol, so a transient fetch failure falls
+# back to the most recent known price instead of leaving open positions
+# unmanaged (stops/targets unchecked) for a cycle. Tracks consecutive failures
+# per symbol to alert (once) when a feed stays down.
+_last_known_price: dict[str, float] = {}
+_consec_fetch_failures: dict[str, int] = {}
+_FETCH_FAILURE_ALERT_AT = 3  # consecutive failed cycles before alerting
 
 
 # --- accounting helpers -------------------------------------------------------
@@ -73,13 +84,47 @@ def _unrealized(db: Session, price_cache: dict[str, float]) -> float:
 
 
 def _price_cache(symbols: set[str]) -> dict[str, float]:
+    """Fetch the current price for each symbol, falling back to the last-known
+    price on a transient failure so open positions still get their stops/targets
+    checked. Logs every failure and alerts once a feed stays down."""
     cache: dict[str, float] = {}
     for s in symbols:
         try:
-            cache[s] = broker.get_price(s)
-        except Exception:
-            pass
+            px = broker.get_price(s)
+            cache[s] = px
+            _last_known_price[s] = px
+            _consec_fetch_failures[s] = 0
+        except Exception as exc:  # noqa: BLE001 — best-effort feed; never break the cycle
+            fails = _consec_fetch_failures.get(s, 0) + 1
+            _consec_fetch_failures[s] = fails
+            stale = _last_known_price.get(s)
+            logger.warning(
+                "price fetch failed for %s (%d consecutive): %s%s",
+                s, fails, exc,
+                f"; using stale {stale}" if stale is not None else "; no stale price available",
+            )
+            if stale is not None:
+                cache[s] = stale  # stale price is better than skipping risk management
+            if fails == _FETCH_FAILURE_ALERT_AT:
+                from app.alerts import send_alert
+
+                send_alert(f"⚠️ Price feed down for {s} ({fails} cycles) — using last-known price.")
     return cache
+
+
+def _liquidation_price(direction: str, entry: float, leverage: float) -> float:
+    """Estimated isolated-margin liquidation price.
+
+    A position liquidates once losses consume the initial margin (1/leverage of
+    notional) down to the exchange maintenance margin, i.e. an adverse move of
+    ``(1/leverage - maintenance_margin_rate)``. Falls back to the naive
+    initial-margin move when leverage is missing/invalid.
+    """
+    if not leverage or leverage <= 0:
+        return entry
+    mmr = max(0.0, settings.maintenance_margin_pct) / 100.0
+    adverse = max(0.0, 1.0 / leverage - mmr)
+    return entry * (1 - adverse) if direction == "LONG" else entry * (1 + adverse)
 
 
 # --- risk gate ----------------------------------------------------------------
@@ -156,7 +201,45 @@ def manage_open_trades(db: Session, price_cache: dict[str, float]) -> list[dict[
     return closed_events
 
 
-def open_from_signal(db: Session, sig: dict[str, Any]) -> dict[str, Any] | None:
+def _correlation_lookup() -> dict[tuple[str, str], float]:
+    """Pairwise return-correlation between universe symbols for this cycle.
+
+    Computed once per cycle (best-effort) and reused for every signal so the
+    correlation guard doesn't reload candles per entry. Empty when disabled or
+    unavailable, which makes the guard a no-op."""
+    if not settings.correlation_guard_enabled:
+        return {}
+    try:
+        from app.market import correlation_matrix
+
+        m = correlation_matrix()
+        if not m.get("available"):
+            return {}
+        syms, mat = m["symbols"], m["matrix"]
+        return {(a, b): mat[i][j] for i, a in enumerate(syms) for j, b in enumerate(syms)}
+    except Exception:  # noqa: BLE001 — guard is advisory; never break the cycle
+        return {}
+
+
+def _correlation_scale(
+    db: Session, symbol: str, direction: str, corr_lookup: dict[tuple[str, str], float] | None
+) -> float:
+    """Scale factor (<=1) when ``symbol`` is highly correlated and same-direction
+    with an already-open position — concentration control. 1.0 when no conflict."""
+    if not settings.correlation_guard_enabled or not corr_lookup:
+        return 1.0
+    for t in open_trades(db):
+        if t.symbol == symbol or t.direction != direction:
+            continue
+        corr = corr_lookup.get((symbol, t.symbol))
+        if corr is not None and corr >= settings.correlation_threshold:
+            return max(0.0, min(1.0, settings.correlation_scale))
+    return 1.0
+
+
+def open_from_signal(
+    db: Session, sig: dict[str, Any], corr_lookup: dict[tuple[str, str], float] | None = None
+) -> dict[str, Any] | None:
     """Open a paper position from a scanner signal if risk checks pass."""
     if not _can_open(db, sig["symbol"], sig["strategy"]):
         return None
@@ -176,10 +259,14 @@ def open_from_signal(db: Session, sig: dict[str, Any]) -> dict[str, Any] | None:
         equity, sig["entry"], sig["stop"], settings.risk_per_trade_pct,
         leverage, settings.max_position_pct,
     )
-    # Agent size multiplier (bounded lever; 1.0 when none set).
-    from app.learning.levers import size_multiplier_safe
+    # Agent levers (bounded; 1.0 when none set): per-strategy size, then a
+    # per-regime multiplier for the signal's current market regime.
+    from app.learning.levers import regime_multiplier_safe, size_multiplier_safe
 
     qty *= size_multiplier_safe(sig["strategy"])
+    qty *= regime_multiplier_safe(sig["strategy"], sig.get("regime", "ranging"))
+    # Correlation guard: scale down when concentrated with the open book.
+    qty *= _correlation_scale(db, sig["symbol"], sig["direction"], corr_lookup)
     if qty <= 0:
         return None
 
@@ -211,17 +298,36 @@ def close_trade_by_id(trade_id: int) -> dict[str, Any] | None:
         return close_trade(db, trade_id)
 
 
+def record_snapshot(db: Session, price_cache: dict[str, float]) -> PortfolioSnapshot:
+    """Persist a point-in-time account snapshot (realized + unrealized = equity)."""
+    balance = realized_balance(db)
+    unreal = _unrealized(db, price_cache)
+    snap = PortfolioSnapshot(
+        realized_balance=round(balance, 2),
+        unrealized_pnl=round(unreal, 2),
+        equity=round(balance + unreal, 2),
+        open_positions=len(open_trades(db)),
+        kill_switch=kill_switch_active(db),
+    )
+    db.add(snap)
+    db.commit()
+    return snap
+
+
 def run_paper_cycle(db: Session, new_signals: list[dict[str, Any]]) -> dict[str, Any]:
     """Manage open trades, then open positions for any new signals."""
     symbols = {t.symbol for t in open_trades(db)} | {s["symbol"] for s in new_signals}
     price_cache = _price_cache(symbols)
 
     closed = manage_open_trades(db, price_cache)
+    corr_lookup = _correlation_lookup() if new_signals else {}
     opened: list[dict[str, Any]] = []
     for sig in new_signals:
-        ev = open_from_signal(db, sig)
+        ev = open_from_signal(db, sig, corr_lookup)
         if ev:
             opened.append(ev)
+    # Snapshot after fills settle so the equity time-series reflects this cycle.
+    record_snapshot(db, price_cache)
     return {"opened": opened, "closed": closed}
 
 
@@ -297,6 +403,33 @@ def equity_curve(db: Session) -> list[dict[str, Any]]:
     return curve
 
 
+def snapshot_history(
+    db: Session, start_ts: int | None = None, end_ts: int | None = None, limit: int = 2000
+) -> list[dict[str, Any]]:
+    """Persisted equity snapshots over time (ms epoch), oldest first.
+
+    Unlike ``equity_curve`` (realized only), each point includes unrealized P&L.
+    ``start_ts``/``end_ts`` are ms-epoch bounds; ``limit`` caps the most recent rows.
+    """
+    stmt = select(PortfolioSnapshot)
+    if start_ts is not None:
+        stmt = stmt.where(PortfolioSnapshot.created_at >= datetime.fromtimestamp(start_ts / 1000, UTC))
+    if end_ts is not None:
+        stmt = stmt.where(PortfolioSnapshot.created_at <= datetime.fromtimestamp(end_ts / 1000, UTC))
+    # Take the most recent ``limit`` rows, then present oldest-first for charting.
+    stmt = stmt.order_by(PortfolioSnapshot.created_at.desc()).limit(limit)
+    rows = list(db.execute(stmt).scalars())
+    rows.reverse()
+    return [{
+        "time": int(s.created_at.replace(tzinfo=UTC).timestamp() * 1000) if s.created_at else 0,
+        "equity": round(s.equity, 2),
+        "realized_balance": round(s.realized_balance, 2),
+        "unrealized_pnl": round(s.unrealized_pnl or 0.0, 2),
+        "open_positions": s.open_positions,
+        "kill_switch": bool(s.kill_switch),
+    } for s in rows]
+
+
 def strategy_attribution(db: Session) -> list[dict[str, Any]]:
     """Per-strategy P&L breakdown from closed trades — which strategy actually earns."""
     by: dict[str, list[PaperTrade]] = {}
@@ -338,8 +471,7 @@ def risk_view(db: Session) -> dict[str, Any]:
         margin += notional / t.leverage if t.leverage else notional
         by_symbol[t.symbol] = by_symbol.get(t.symbol, 0.0) + notional
         net_dirs.add(t.direction)
-        # Rough liquidation price (ignores maintenance margin/fees) ~ entry × (1 ∓ 1/lev).
-        liq = t.entry_price * (1 - 1 / t.leverage) if t.direction == "LONG" else t.entry_price * (1 + 1 / t.leverage)
+        liq = _liquidation_price(t.direction, t.entry_price, t.leverage)
         positions.append({
             "id": t.id, "symbol": t.symbol, "direction": t.direction,
             "leverage": t.leverage, "notional": round(notional, 2),

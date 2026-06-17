@@ -13,7 +13,13 @@ from app.config import settings
 from app.db.session import Base
 from app.learning import agent as brain
 from app.learning import allocation, levers, optimizer
-from app.models import ActiveStrategy, AgentProposal, PaperTrade, Setting  # noqa: F401
+from app.models import (  # noqa: F401
+    ActiveStrategy,
+    AgentProposal,
+    PaperTrade,
+    Setting,
+    TrainingSample,
+)
 
 
 @pytest.fixture
@@ -103,6 +109,44 @@ def test_size_multiplier_lever_bounded(db):
     levers.set_multiplier(db, "macd_rsi", 0.01)  # under floor
     assert levers.get_multiplier(db, "macd_rsi") == levers.MIN_MULT
     assert levers.get_multiplier(db, "unknown") == 1.0
+
+
+def _add_sample(db, strategy, regime, label, bar_time):
+    db.add(TrainingSample(
+        symbol="BTCUSDT", timeframe="1h", strategy=strategy, direction=1,
+        regime=regime, label=label, bar_time=bar_time, source="backtest",
+    ))
+
+
+def test_regime_multiplier_lever_bounded(db):
+    levers.set_regime_multiplier(db, "macd_rsi", "ranging", 99.0)  # over cap
+    assert levers.get_regime_multiplier(db, "macd_rsi", "ranging") == levers.MAX_MULT
+    levers.set_regime_multiplier(db, "macd_rsi", "ranging", 0.01)  # under floor
+    assert levers.get_regime_multiplier(db, "macd_rsi", "ranging") == levers.MIN_MULT
+    # Untouched regime/strategy default to neutral 1.0.
+    assert levers.get_regime_multiplier(db, "macd_rsi", "trending_up") == 1.0
+    assert levers.get_regime_multiplier(db, "unknown", "ranging") == 1.0
+
+
+def test_allocation_proposes_regime_reduction(db):
+    for i in range(12):
+        _add_sample(db, "macd_rsi", "ranging", 0, i)  # all losses in 'ranging'
+    db.commit()
+    props = allocation.propose(db)
+    regime_props = [p for p in props if p["kind"] == "set_regime_multiplier"]
+    assert any(p["payload"]["regime"] == "ranging" for p in regime_props)
+
+
+def test_agent_applies_and_reverts_regime_multiplier(db):
+    for i in range(12):
+        _add_sample(db, "macd_rsi", "ranging", 0, i)
+    db.commit()
+    created = brain.generate_proposals(db)
+    rp = next(p for p in created if p.kind == "set_regime_multiplier")
+    brain.approve(db, rp.id)
+    assert levers.get_regime_multiplier(db, "macd_rsi", "ranging") == 0.5  # lever applied
+    brain.revert(db, rp.id)
+    assert levers.get_regime_multiplier(db, "macd_rsi", "ranging") == 1.0  # restored
 
 
 def test_overview_shape(db):
