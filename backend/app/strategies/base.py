@@ -78,7 +78,10 @@ def run_strategy(
     strat = get_strategy(name)
     params = merge_params(name, overrides)
     out = strat.generate(df.copy(), params)
-    out["signal"] = out["signal"].fillna(0).astype(int)
+    # Enforce the contract: signal is a target position in {-1, 0, 1}. NaN -> flat,
+    # and any out-of-range value is clamped so a misbehaving strategy can't latch a
+    # non-reversing position downstream (backtester/scanner rely on this invariant).
+    out["signal"] = out["signal"].fillna(0).clip(-1, 1).astype(int)
     return out
 
 

@@ -26,6 +26,31 @@ def test_strategy_outputs_signal_and_atr(name, trending_up):
     assert len(out) == len(trending_up)
 
 
+def test_run_strategy_clamps_out_of_range_signals(trending_up):
+    """A misbehaving strategy emitting values outside {-1,0,1} (or NaN) must be
+    clamped so the backtester/scanner never latch a non-reversing position."""
+    import numpy as np
+
+    from app.strategies.base import _REGISTRY, StrategyDef, register, run_strategy
+
+    def bad_generate(df, params):
+        df["atr"] = 1.0
+        df["signal"] = 2  # out of contract range
+        df.iloc[0, df.columns.get_loc("signal")] = np.nan
+        df.iloc[1, df.columns.get_loc("signal")] = -5
+        return df
+
+    register(StrategyDef(name="_bad_test", description="x", generate=bad_generate))
+    try:
+        out = run_strategy("_bad_test", trending_up)
+        assert set(out["signal"].unique()) <= {-1, 0, 1}
+        assert out["signal"].iloc[0] == 0   # NaN -> flat
+        assert out["signal"].iloc[1] == -1  # -5 clamped
+        assert out["signal"].iloc[2] == 1   # 2 clamped
+    finally:
+        _REGISTRY.pop("_bad_test", None)
+
+
 def test_ema_trend_goes_long_in_uptrend(trending_up):
     out = run_strategy("ema_trend_adx", trending_up)
     # A persistent uptrend should produce some long target-position bars.

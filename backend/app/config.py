@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     max_concurrent_positions: int = 5
     max_position_pct: float = 30.0      # max notional as % of equity (pre-leverage)
     daily_max_loss_pct: float = 5.0     # kill switch: stop new trades for the day
+    # Exchange maintenance-margin rate (% of notional); used only to estimate the
+    # liquidation price more realistically than the naive initial-margin formula.
+    maintenance_margin_pct: float = 0.5
     # Trailing stop: once price moves trail_activate_pct in favor, ratchet the stop
     # to trail_distance_pct behind the current price (never loosens).
     trailing_enabled: bool = True

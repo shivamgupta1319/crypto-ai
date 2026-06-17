@@ -38,6 +38,17 @@ def equity_curve(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
     return engine.equity_curve(db)
 
 
+@router.get("/history")
+def history(
+    start_ts: int | None = None,
+    end_ts: int | None = None,
+    limit: int = 2000,
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """Persisted equity snapshots over time (includes unrealized P&L)."""
+    return engine.snapshot_history(db, start_ts=start_ts, end_ts=end_ts, limit=limit)
+
+
 @router.post("/positions/{position_id}/close")
 async def close_position(position_id: int) -> dict[str, Any]:
     """Manually close an open position at the current market price."""

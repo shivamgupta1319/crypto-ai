@@ -7,6 +7,7 @@ logic will guard live trading in Phase 5 — only the broker swaps.
 """
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from typing import Any
 
@@ -17,10 +18,20 @@ from app.broker.base import BrokerInterface
 from app.broker.paper import PaperBroker
 from app.config import settings
 from app.db.session import SessionLocal
-from app.models import PaperTrade
+from app.models import PaperTrade, PortfolioSnapshot
 from app.portfolio.sizing import size_position
 
+logger = logging.getLogger(__name__)
+
 broker: BrokerInterface = PaperBroker()
+
+# Last successfully-fetched price per symbol, so a transient fetch failure falls
+# back to the most recent known price instead of leaving open positions
+# unmanaged (stops/targets unchecked) for a cycle. Tracks consecutive failures
+# per symbol to alert (once) when a feed stays down.
+_last_known_price: dict[str, float] = {}
+_consec_fetch_failures: dict[str, int] = {}
+_FETCH_FAILURE_ALERT_AT = 3  # consecutive failed cycles before alerting
 
 
 # --- accounting helpers -------------------------------------------------------
@@ -73,13 +84,47 @@ def _unrealized(db: Session, price_cache: dict[str, float]) -> float:
 
 
 def _price_cache(symbols: set[str]) -> dict[str, float]:
+    """Fetch the current price for each symbol, falling back to the last-known
+    price on a transient failure so open positions still get their stops/targets
+    checked. Logs every failure and alerts once a feed stays down."""
     cache: dict[str, float] = {}
     for s in symbols:
         try:
-            cache[s] = broker.get_price(s)
-        except Exception:
-            pass
+            px = broker.get_price(s)
+            cache[s] = px
+            _last_known_price[s] = px
+            _consec_fetch_failures[s] = 0
+        except Exception as exc:  # noqa: BLE001 — best-effort feed; never break the cycle
+            fails = _consec_fetch_failures.get(s, 0) + 1
+            _consec_fetch_failures[s] = fails
+            stale = _last_known_price.get(s)
+            logger.warning(
+                "price fetch failed for %s (%d consecutive): %s%s",
+                s, fails, exc,
+                f"; using stale {stale}" if stale is not None else "; no stale price available",
+            )
+            if stale is not None:
+                cache[s] = stale  # stale price is better than skipping risk management
+            if fails == _FETCH_FAILURE_ALERT_AT:
+                from app.alerts import send_alert
+
+                send_alert(f"⚠️ Price feed down for {s} ({fails} cycles) — using last-known price.")
     return cache
+
+
+def _liquidation_price(direction: str, entry: float, leverage: float) -> float:
+    """Estimated isolated-margin liquidation price.
+
+    A position liquidates once losses consume the initial margin (1/leverage of
+    notional) down to the exchange maintenance margin, i.e. an adverse move of
+    ``(1/leverage - maintenance_margin_rate)``. Falls back to the naive
+    initial-margin move when leverage is missing/invalid.
+    """
+    if not leverage or leverage <= 0:
+        return entry
+    mmr = max(0.0, settings.maintenance_margin_pct) / 100.0
+    adverse = max(0.0, 1.0 / leverage - mmr)
+    return entry * (1 - adverse) if direction == "LONG" else entry * (1 + adverse)
 
 
 # --- risk gate ----------------------------------------------------------------
@@ -211,6 +256,22 @@ def close_trade_by_id(trade_id: int) -> dict[str, Any] | None:
         return close_trade(db, trade_id)
 
 
+def record_snapshot(db: Session, price_cache: dict[str, float]) -> PortfolioSnapshot:
+    """Persist a point-in-time account snapshot (realized + unrealized = equity)."""
+    balance = realized_balance(db)
+    unreal = _unrealized(db, price_cache)
+    snap = PortfolioSnapshot(
+        realized_balance=round(balance, 2),
+        unrealized_pnl=round(unreal, 2),
+        equity=round(balance + unreal, 2),
+        open_positions=len(open_trades(db)),
+        kill_switch=kill_switch_active(db),
+    )
+    db.add(snap)
+    db.commit()
+    return snap
+
+
 def run_paper_cycle(db: Session, new_signals: list[dict[str, Any]]) -> dict[str, Any]:
     """Manage open trades, then open positions for any new signals."""
     symbols = {t.symbol for t in open_trades(db)} | {s["symbol"] for s in new_signals}
@@ -222,6 +283,8 @@ def run_paper_cycle(db: Session, new_signals: list[dict[str, Any]]) -> dict[str,
         ev = open_from_signal(db, sig)
         if ev:
             opened.append(ev)
+    # Snapshot after fills settle so the equity time-series reflects this cycle.
+    record_snapshot(db, price_cache)
     return {"opened": opened, "closed": closed}
 
 
@@ -297,6 +360,33 @@ def equity_curve(db: Session) -> list[dict[str, Any]]:
     return curve
 
 
+def snapshot_history(
+    db: Session, start_ts: int | None = None, end_ts: int | None = None, limit: int = 2000
+) -> list[dict[str, Any]]:
+    """Persisted equity snapshots over time (ms epoch), oldest first.
+
+    Unlike ``equity_curve`` (realized only), each point includes unrealized P&L.
+    ``start_ts``/``end_ts`` are ms-epoch bounds; ``limit`` caps the most recent rows.
+    """
+    stmt = select(PortfolioSnapshot)
+    if start_ts is not None:
+        stmt = stmt.where(PortfolioSnapshot.created_at >= datetime.fromtimestamp(start_ts / 1000, UTC))
+    if end_ts is not None:
+        stmt = stmt.where(PortfolioSnapshot.created_at <= datetime.fromtimestamp(end_ts / 1000, UTC))
+    # Take the most recent ``limit`` rows, then present oldest-first for charting.
+    stmt = stmt.order_by(PortfolioSnapshot.created_at.desc()).limit(limit)
+    rows = list(db.execute(stmt).scalars())
+    rows.reverse()
+    return [{
+        "time": int(s.created_at.replace(tzinfo=UTC).timestamp() * 1000) if s.created_at else 0,
+        "equity": round(s.equity, 2),
+        "realized_balance": round(s.realized_balance, 2),
+        "unrealized_pnl": round(s.unrealized_pnl or 0.0, 2),
+        "open_positions": s.open_positions,
+        "kill_switch": bool(s.kill_switch),
+    } for s in rows]
+
+
 def strategy_attribution(db: Session) -> list[dict[str, Any]]:
     """Per-strategy P&L breakdown from closed trades — which strategy actually earns."""
     by: dict[str, list[PaperTrade]] = {}
@@ -338,8 +428,7 @@ def risk_view(db: Session) -> dict[str, Any]:
         margin += notional / t.leverage if t.leverage else notional
         by_symbol[t.symbol] = by_symbol.get(t.symbol, 0.0) + notional
         net_dirs.add(t.direction)
-        # Rough liquidation price (ignores maintenance margin/fees) ~ entry × (1 ∓ 1/lev).
-        liq = t.entry_price * (1 - 1 / t.leverage) if t.direction == "LONG" else t.entry_price * (1 + 1 / t.leverage)
+        liq = _liquidation_price(t.direction, t.entry_price, t.leverage)
         positions.append({
             "id": t.id, "symbol": t.symbol, "direction": t.direction,
             "leverage": t.leverage, "notional": round(notional, 2),

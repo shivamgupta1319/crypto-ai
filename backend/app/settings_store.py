@@ -38,6 +38,8 @@ FIELDS: list[Field] = [
     Field("max_concurrent_positions", "int", "Max concurrent positions", 1, 50),
     Field("max_position_pct", "float", "Max position size (% equity)", 1.0, 100.0),
     Field("daily_max_loss_pct", "float", "Daily loss kill-switch (%)", 0.5, 50.0),
+    Field("maintenance_margin_pct", "float", "Maintenance margin (%)", 0.0, 10.0,
+          note="Used to estimate liquidation price."),
     Field("trailing_enabled", "bool", "Trailing stop enabled"),
     Field("trail_activate_pct", "float", "Trail activate (%)", 0.1, 20.0),
     Field("trail_distance_pct", "float", "Trail distance (%)", 0.1, 20.0),
