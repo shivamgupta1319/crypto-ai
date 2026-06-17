@@ -157,16 +157,31 @@ export default function Portfolio() {
         const drawdown = computeDrawdown(history)
         const maxDd = Math.min(0, ...drawdown.map((d) => d.value))
         const peakEquity = Math.max(...history.map((h) => h.equity))
+        const eqValues = history.map((h) => h.equity)
+        // No variation yet (idle account) → a flat line reads as "broken", so show
+        // a collecting-state note until equity actually moves.
+        const flat = Math.max(...eqValues) === Math.min(...eqValues)
+        const collecting = (
+          <div className="h-[200px] flex flex-col items-center justify-center text-center px-4">
+            <p className="text-slate-400 text-sm">Collecting snapshots ({history.length} so far)</p>
+            <p className="text-slate-500 text-xs mt-1">
+              Recorded each scan cycle (~60s). This fills in once open positions move the equity —
+              promote a strategy (Backtest → Auto-Select) to drive activity.
+            </p>
+          </div>
+        )
         return (
           <div className="grid lg:grid-cols-2 gap-4 mb-6">
             <Card>
               <div className="font-medium mb-3">Equity over time (incl. unrealized)</div>
-              <PerformanceChart
-                series={[
-                  { label: 'equity', color: '#34d399', type: 'line', data: history.map((h) => ({ time: h.time, value: h.equity })) },
-                  { label: 'realized', color: '#60a5fa', type: 'line', data: history.map((h) => ({ time: h.time, value: h.realized_balance })) },
-                ]}
-              />
+              {flat ? collecting : (
+                <PerformanceChart
+                  series={[
+                    { label: 'equity', color: '#34d399', type: 'line', data: history.map((h) => ({ time: h.time, value: h.equity })) },
+                    { label: 'realized', color: '#60a5fa', type: 'line', data: history.map((h) => ({ time: h.time, value: h.realized_balance })) },
+                  ]}
+                />
+              )}
               <p className="text-xs text-slate-500 mt-2">
                 <span className="text-emerald-400">equity</span> tracks open-position swings;{' '}
                 <span className="text-sky-400">realized</span> is balance from closed trades only.
@@ -180,7 +195,9 @@ export default function Portfolio() {
                   <Stat label="Max drawdown" value={`${maxDd.toFixed(2)}%`} tone={maxDd < 0 ? 'neg' : undefined} />
                 </div>
               </div>
-              <PerformanceChart series={[{ label: 'drawdown', color: '#f43f5e', type: 'area', data: drawdown }]} />
+              {flat ? collecting : (
+                <PerformanceChart series={[{ label: 'drawdown', color: '#f43f5e', type: 'area', data: drawdown }]} />
+              )}
             </Card>
           </div>
         )

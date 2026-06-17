@@ -276,6 +276,20 @@ def test_liquidation_price_guards_zero_leverage():
     assert pe._liquidation_price("LONG", 100.0, 0.0) == 100.0
 
 
+def test_equity_curve_anchors_at_real_time_not_epoch(db, fake_broker):
+    # No trades yet → single baseline point.
+    assert pe.equity_curve(db) == [{"time": 0, "equity": 100000.0}]
+    # One closed trade → baseline anchor must be a real timestamp (not 1970/epoch 0)
+    # and strictly before the first close, so the chart's time axis isn't distorted.
+    pe.open_from_signal(db, _sig(entry=100.0, stop=98.0, target=104.0))
+    pe.manage_open_trades(db, {"BTCUSDT": 104.5})  # close in profit
+    curve = pe.equity_curve(db)
+    assert len(curve) == 2
+    assert curve[0]["time"] > 0  # anchored at the trade's open, not epoch 0
+    assert curve[0]["time"] < curve[1]["time"]  # strictly ascending
+    assert curve[0]["equity"] == 100000.0  # starting-capital baseline
+
+
 # --- regime-adaptive + correlation-aware sizing ------------------------------
 def test_regime_multiplier_scales_position_size(db, fake_broker, monkeypatch):
     from app.learning import levers
