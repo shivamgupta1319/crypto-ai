@@ -388,6 +388,12 @@ def closed_trades_view(db: Session, limit: int = 100) -> list[dict[str, Any]]:
     } for t in rows]
 
 
+def _ms(dt: datetime | None) -> int | None:
+    if dt is None:
+        return None
+    return int(dt.replace(tzinfo=UTC).timestamp() * 1000) if dt.tzinfo is None else int(dt.timestamp() * 1000)
+
+
 def equity_curve(db: Session) -> list[dict[str, Any]]:
     """Realized equity over time from closed trades (cumulative)."""
     rows = db.execute(
@@ -395,11 +401,20 @@ def equity_curve(db: Session) -> list[dict[str, Any]]:
         .order_by(PaperTrade.closed_at.asc())
     ).scalars().all()
     eq = settings.initial_capital
-    curve = [{"time": 0, "equity": round(eq, 2)}]
+    if not rows:
+        return [{"time": 0, "equity": round(eq, 2)}]
+    # Anchor the starting-capital baseline at the earliest trade's *open* time, not
+    # the 1970 epoch (time=0) — a 1970 anchor stretches the chart's time axis from
+    # 1970 to now and renders as a distorted/criss-crossed line.
+    first_ts = _ms(rows[0].closed_at) or 0
+    opens = [m for m in (_ms(t.opened_at) for t in rows) if m is not None]
+    anchor_ts = min(opens) if opens else first_ts
+    if anchor_ts >= first_ts:  # keep times strictly ascending for the chart
+        anchor_ts = first_ts - 1
+    curve = [{"time": anchor_ts, "equity": round(eq, 2)}]
     for t in rows:
         eq += t.pnl or 0.0
-        ts = int(t.closed_at.replace(tzinfo=UTC).timestamp() * 1000) if t.closed_at else 0
-        curve.append({"time": ts, "equity": round(eq, 2)})
+        curve.append({"time": _ms(t.closed_at) or 0, "equity": round(eq, 2)})
     return curve
 
 
