@@ -5,3 +5,7 @@ __pycache__/
 *.db
 *.sqlite*
 tests/
+
+.env
+*.env
+!.env.example
