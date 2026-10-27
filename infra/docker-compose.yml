@@ -1,0 +1,34 @@
+# crypto-ai — pull-based stack for work-pc (images from Docker Hub, no source/build needed).
+# Explicit project name so volumes/containers don't collide with other stacks on the host.
+name: crypto-ai
+
+services:
+  backend:
+    image: shivam13gupta/crypto-ai-backend:latest
+    pull_policy: always
+    restart: unless-stopped
+    # Optional AI/alert keys; stack still boots without the file.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - CRYPTOAI_DB_PATH=/data/cryptoai.db
+    volumes:
+      - cryptoai-data:/data            # SQLite DB + candle cache persist here
+    ports:
+      - "${BACKEND_PORT:-8090}:8000"
+
+  frontend:
+    image: shivam13gupta/crypto-ai-frontend:latest
+    pull_policy: always
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "${FRONTEND_PORT:-5190}:80"     # nginx serves SPA + proxies /api + WS to backend
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ${HTPASSWD_FILE:-../../edge/.htpasswd}:/etc/nginx/.htpasswd:ro
+
+volumes:
+  cryptoai-data:
