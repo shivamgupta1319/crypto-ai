@@ -14,6 +14,8 @@ export default function App() {
       <Routes>
         <Route element={<Layout />}>
           <Route index element={<Dashboard />} />
+          {/* On the deployed site / is a public landing page, so the app's home lives here. */}
+          <Route path="dashboard" element={<Dashboard />} />
           <Route path="scanner" element={<Scanner />} />
           <Route path="portfolio" element={<Portfolio />} />
           <Route path="backtest" element={<Backtest />} />

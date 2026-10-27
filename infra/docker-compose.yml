@@ -16,7 +16,9 @@ services:
     volumes:
       - cryptoai-data:/data            # SQLite DB + candle cache persist here
     ports:
-      - "${BACKEND_PORT:-8090}:8000"
+      # Loopback only: the tunnel is host-networked and reaches 127.0.0.1; the API has no auth of
+      # its own, so it must not be offered to the LAN.
+      - "127.0.0.1:${BACKEND_PORT:-8090}:8000"
 
   frontend:
     image: shivam13gupta/crypto-ai-frontend:latest
@@ -25,10 +27,12 @@ services:
     depends_on:
       - backend
     ports:
-      - "${FRONTEND_PORT:-5190}:80"     # nginx serves SPA + proxies /api + WS to backend
+      - "127.0.0.1:${FRONTEND_PORT:-5190}:80"     # nginx serves SPA + proxies /api + WS to backend
     volumes:
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
       - ${HTPASSWD_FILE:-../../edge/.htpasswd}:/etc/nginx/.htpasswd:ro
+      # Public landing page served at / (see nginx/default.conf).
+      - ./landing:/usr/share/nginx/landing:ro
 
 volumes:
   cryptoai-data:
