@@ -21,6 +21,7 @@ services:
       - "127.0.0.1:${BACKEND_PORT:-8090}:8000"
 
   frontend:
+    networks: [default, sso]
     image: shivam13gupta/crypto-ai-frontend:latest
     pull_policy: always
     restart: unless-stopped
@@ -30,9 +31,13 @@ services:
       - "127.0.0.1:${FRONTEND_PORT:-5190}:80"     # nginx serves SPA + proxies /api + WS to backend
     volumes:
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
-      - ${HTPASSWD_FILE:-../../edge/.htpasswd}:/etc/nginx/.htpasswd:ro
       # Public landing page served at / (see nginx/default.conf).
       - ./landing:/usr/share/nginx/landing:ro
 
 volumes:
   cryptoai-data:
+
+networks:
+  # pseo-identity's Authelia (shared sign-in), created once with `docker network create sso`.
+  sso:
+    external: true
